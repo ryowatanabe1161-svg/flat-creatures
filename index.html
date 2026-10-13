@@ -370,6 +370,7 @@ table.tc .w{background:#e3e8f5;color:#678;}
 
 <div class="modal" id="modal"><div class="mbox" id="mbox"></div></div>
 </div>
+<script src="../fuusan-games/party.js"></script>
 <script>
 'use strict';
 const FAST = /fast/.test(location.search);
@@ -2488,7 +2489,8 @@ function leaveOnline(note){
 }
 function peerErr(e){
   const t = e && e.type;
-  if (t === 'unavailable-id' && NET.host && NET.phase === 'hosting'){ try { NET.peer.destroy(); } catch(_){} return hostRoom(); }
+  if (t === 'unavailable-id' && NET.host && NET.phase === 'hosting'){ try { NET.peer.destroy(); } catch(_){} if ((window.FuuParty && FuuParty.info)) return setTimeout(hostRoom, 2500); return hostRoom(); }
+  if (t === 'peer-unavailable' && (window.FuuParty && FuuParty.info) && NET.phase === 'joining' && (NET.ptries = (NET.ptries || 0) + 1) < FuuParty.retries){ setTimeout(() => { if (NET.phase === 'joining' && NET.peer && !NET.peer.destroyed) setupConn(NET.peer.connect(PEER_PREFIX + NET.code, {reliable:true, serialization:'json'})); }, FuuParty.retryMs); return; }
   if (t === 'peer-unavailable') return leaveOnline('へやが みつかりませんでした。コードを たしかめてね');
   if (NET.phase === 'battle') return;
   leaveOnline(t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed' ? 'サーバーに つながりません。インターネットを たしかめてね' : 'つうしんエラー（' + esc(t || e) + '）');
@@ -2501,11 +2503,12 @@ function newPeer(id){
   return p;
 }
 function hostRoom(){
-  NET.host = true; NET.code = String(10000 + Math.floor(Math.random() * 90000)); NET.phase = 'hosting';
+  NET.host = true; NET.code = (window.FuuParty && FuuParty.info) && FuuParty.info.host ? 'P' + FuuParty.info.code : String(10000 + Math.floor(Math.random() * 90000)); NET.phase = 'hosting';
   $('#onl').innerHTML = '<div class="onlwait"><span class="dots"></span> へやを つくっています…</div>'; onlMsg('');
   try { NET.peer = newPeer(PEER_PREFIX + NET.code); } catch(e){ return leaveOnline('オンライン きのうが つかえません'); }
   NET.peer.on('open', () => { if (NET.phase === 'hosting') renderHosting(); });
   NET.peer.on('connection', c => {
+    if (NET.conn && (window.FuuParty && FuuParty.info)){ NET.partyConns = (NET.partyConns || []).filter(x => x.open); NET.partyConns.push(c); c.on('open', () => c.send({t:'party-busy'})); return; }   // みんなの部屋：3人目以降は待機（次のゲームの合図だけ届ける）
     if (NET.conn && NET.conn.open){ c.on('open', () => { c.send({t:'error', msg:'busy'}); setTimeout(() => c.close(), 500); }); return; }
     setupConn(c);
   });
@@ -2515,7 +2518,7 @@ function joinRoom(code){
   $('#onl').innerHTML = `<div class="onlwait"><span class="dots"></span> へや ${esc(code)} に せつぞく中…</div>`; onlMsg('');
   try { NET.peer = newPeer(null); } catch(e){ return leaveOnline('オンライン きのうが つかえません'); }
   NET.peer.on('open', () => setupConn(NET.peer.connect(PEER_PREFIX + code, {reliable:true, serialization:'json'})));
-  setTimeout(() => { if (NET.phase === 'joining') leaveOnline('せつぞく できませんでした。コードと インターネットを たしかめてね'); }, 20000);
+  setTimeout(() => { if (NET.phase === 'joining' && !(window.FuuParty && FuuParty.info)) leaveOnline('せつぞく できませんでした。コードと インターネットを たしかめてね'); }, 20000);
 }
 function setupConn(c){
   NET.conn = c;
@@ -2545,6 +2548,8 @@ function onDisconnect(){
 function onData(d){
   NET.last = Date.now();
   if (!d || typeof d !== 'object' || typeof d.t !== 'string') return;
+  if (d.t === 'fuu-goto'){ if ((window.FuuParty && FuuParty.info)) FuuParty.handle(d); return; }
+  if (d.t === 'party-busy'){ NET.phase = 'party-wait'; clearInterval(NET.hb); NET.hb = null; $('#onl').innerHTML = '<div class="onlwait">このゲームは2人用です。いまは ほかの2人が たいせん中。<br>ホストが つぎのゲームを えらぶと、みんなで いどうするよ</div>'; return; }
   switch (d.t){
     case 'ping': return;
     case 'hello': {
@@ -2726,7 +2731,17 @@ $('#b-online').onclick = () => openOnline();
 $('#b-onlback').onclick = () => { if (NET.phase !== 'idle') leaveOnline(''); renderTitle(); show('title'); };
 window.__FC.NET = NET;
 window.addEventListener('load', () => {
-  if (QS.get('room')){ NET.pendingJoin = QS.get('room').replace(/\D/g, '').slice(0, 6); if (NET.pendingJoin.length >= 4) openOnline(); else NET.pendingJoin = null; }
+  // ---- ひろばの「みんなの部屋」 ----
+  if (window.FuuParty && FuuParty.info){
+    const P = FuuParty.info; save.name = (P.name || save.name || 'プレイヤー').slice(0, 8);
+    FuuParty.init({ game: 'flat-creatures', isHost: () => NET.host && NET.phase !== 'idle',
+      inGame: () => NET.phase === 'battle' || NET.phase === 'pick',
+      broadcast: m => { NET.send(m); (NET.partyConns || []).forEach(c => { try { c.send(m); } catch(e){} }); } });
+    FuuParty.status = () => NET.host ? { host: 1, n: (NET.conn && NET.conn.open ? 1 : 0) + (NET.partyConns || []).filter(c => c.open).length } : { host: 0, joined: !!(NET.conn && NET.conn.open) };
+    if (P.host){ if (save.team.length === 6){ show('online'); hostRoom(); } else { afterTeam = 'online'; openTeam(); } }
+    else { NET.pendingJoin = 'P' + P.code; openOnline(); }
+  }
+  else if (QS.get('room')){ NET.pendingJoin = QS.get('room').replace(/\D/g, '').slice(0, 6); if (NET.pendingJoin.length >= 4) openOnline(); else NET.pendingJoin = null; }
 });
 window.addEventListener('pagehide', () => { if (NET.conn && NET.conn.open) NET.send({t:'bye'}); });
 </script><script>
